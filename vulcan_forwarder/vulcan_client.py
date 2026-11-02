@@ -31,7 +31,7 @@ from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
-from vulcan_forwarder.config import VULCAN_FIELDS, Settings
+from vulcan_forwarder.config import Account, Settings
 from vulcan_forwarder.resilience import retry
 
 log = logging.getLogger(__name__)
@@ -147,9 +147,10 @@ class VulcanClient:
     gdy wygasła. Przy wyjściu zapisuje sesję z uprawnieniami 600.
     """
 
-    def __init__(self, settings: Settings, headed: bool = False, debug: bool = False):
-        settings.require(*VULCAN_FIELDS)
+    def __init__(self, settings: Settings, account: Account, headed: bool = False, debug: bool = False):
         self.settings = settings
+        self.account = account
+        self.state_dir = account.state_dir(settings)
         self.headed = headed
         self.debug = debug
         self._pw: Playwright | None = None
@@ -158,7 +159,7 @@ class VulcanClient:
         self._page: Page | None = None
         self._symbol: str | None = None
         self._step = 0
-        self._debug_run_dir = settings.debug_dir / time.strftime("run-%Y%m%d-%H%M%S")
+        self._debug_run_dir = settings.debug_dir / time.strftime(f"run-%Y%m%d-%H%M%S-{account.name}")
 
     # --- cykl życia -------------------------------------------------------------------------
 
@@ -166,7 +167,7 @@ class VulcanClient:
         self._pw = sync_playwright().start()
         try:
             self._browser = self._pw.chromium.launch(headless=not self.headed)
-            session = self.settings.session_path
+            session = self.session_path
             self._ctx = self._browser.new_context(
                 storage_state=str(session) if session.exists() else None,
                 locale="pl-PL",
@@ -240,7 +241,7 @@ class VulcanClient:
         self._accept_cookies()
         self.snapshot("login-form")
 
-        page.get_by_label("Login").fill(self.settings.vulcan_login)
+        page.get_by_label("Login").fill(self.account.login)
         page.get_by_role("button", name="Dalej").click()
         password = page.locator("input[type=password]")
         try:
@@ -249,7 +250,7 @@ class VulcanClient:
             raise self._login_failure("Po podaniu loginu nie pojawiło się pole hasła") from None
         self.snapshot("password-form")
 
-        password.fill(self.settings.vulcan_password.get_secret_value())
+        password.fill(self.account.password.get_secret_value())
         page.get_by_role("button", name="Zaloguj").click()
         try:
             page.wait_for_url(lambda url: "/logowanie" not in url, timeout=NAV_TIMEOUT_MS)
@@ -263,7 +264,7 @@ class VulcanClient:
 
         if not self._symbol:
             self._symbol = self._detect_symbol()
-            self._save_meta({"symbol": self._symbol})
+            self._save_meta({**self._load_meta(), "symbol": self._symbol})
 
     def _accept_cookies(self) -> None:
         button = self.page.frame_locator("#respect-privacy-frame").get_by_role("button", name="Zgadzam się")
@@ -309,7 +310,7 @@ class VulcanClient:
         return VulcanLoginError(message, shot)
 
     def _save_session(self) -> None:
-        path = self.settings.session_path
+        path = self.session_path
         path.parent.mkdir(parents=True, exist_ok=True)
         assert self._ctx is not None
         self._ctx.storage_state(path=str(path))
@@ -317,7 +318,11 @@ class VulcanClient:
 
     @property
     def _meta_path(self) -> Path:
-        return self.settings.state_dir / "vulcan.json"
+        return self.state_dir / "vulcan.json"
+
+    @property
+    def session_path(self) -> Path:
+        return self.state_dir / "session.json"
 
     def _load_meta(self) -> dict[str, Any]:
         try:
@@ -348,8 +353,12 @@ class VulcanClient:
             self._dump_json(endpoint, data)
         return data
 
-    def mailboxes(self) -> list[dict[str, Any]]:
-        return self._get_json("Skrzynki")
+    def mailboxes(self) -> list[str]:
+        """Nazwy skrzynek konta (np. „Rodzic - R - Uczeń - (Szkoła)”). Zapamiętywane w state, żeby
+        przypisywać powiadomienia do kont bez logowania (`known_mailboxes`)."""
+        names = [box.get("nazwa") or "" for box in self._get_json("Skrzynki")]
+        self._save_meta({**self._load_meta(), "mailboxes": names})
+        return names
 
     def list_received(self, stop_before: datetime | None = None, max_pages: int = 20) -> list[MessageSummary]:
         """Odebrane, od najnowszych. Kończy, gdy dojdzie do wiadomości starszych niż `stop_before`."""
@@ -404,8 +413,17 @@ class VulcanClient:
         (out / f"{self._step:02d}_api_{name}.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
 
     def _redact(self, text: str) -> str:
-        secret = self.settings.vulcan_password.get_secret_value()
+        secret = self.account.password.get_secret_value()
         return text.replace(secret, "***") if secret else text
+
+
+def known_mailboxes(settings: Settings, account: Account) -> list[str]:
+    """Skrzynki konta zapamiętane przy ostatnim połączeniu (pusta lista, gdy jeszcze nie znane)."""
+    try:
+        meta = json.loads((account.state_dir(settings) / "vulcan.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return list(meta.get("mailboxes") or [])
 
 
 def _chmod_600(path: Path) -> None:

@@ -76,7 +76,8 @@ def student_of(mailbox: str | None) -> str | None:
     return parsed.student if parsed else None
 
 
-def build_email(message: Message, settings: Settings, link: str | None = None) -> EmailMessage:
+def build_email(message: Message, settings: Settings, recipients: str, link: str | None = None) -> EmailMessage:
+    """Mail z pełną treścią wiadomości; `recipients` — adresy konta, do którego należy wiadomość."""
     sender_name = short_name(message.sender)
     student = student_of(message.mailbox)
     sent = message.sent_at.strftime("%d.%m.%Y %H:%M")
@@ -85,7 +86,7 @@ def build_email(message: Message, settings: Settings, link: str | None = None) -
     msg = EmailMessage()
     msg["Subject"] = f"[Vulcan] {message.subject} — {sender_name}"
     msg["From"] = settings.mail_from
-    msg["To"] = settings.mail_recipient
+    msg["To"] = recipients
     msg["Date"] = format_datetime(message.sent_at)
     msg["Message-ID"] = make_msgid(idstring=message.key, domain="vulcan-forwarder.local")
     msg["X-Vulcan-Message-Key"] = message.key

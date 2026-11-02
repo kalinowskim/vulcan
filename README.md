@@ -3,7 +3,8 @@
 Przekazuje na e-mail **pełną treść** wiadomości z dziennika VULCAN (eduVULCAN). Vulcan wysyła tylko
 powiadomienie „masz nową wiadomość” — serwis łapie je w skrzynce IMAP, loguje się do eduVULCAN,
 pobiera treść i wysyła czytelny mail (HTML + tekst) z nadawcą, adresatami, datą, uczniem i linkami
-do załączników.
+do załączników. Obsługuje kilka kont eduVULCAN (np. obojga rodziców) — wiadomości każdego konta idą na
+jego własne adresy.
 
 ## Jak to działa
 
@@ -18,6 +19,18 @@ do załączników.
    - bez UUID (np. zmieniony format): nadawca + temat + skrzynka ucznia + czas (±10 min).
 5. Wysłane wiadomości są zapisywane w SQLite (`state/forwarder.db`) — nic nie pójdzie dwa razy.
    Powiadomienie dostaje flagę IMAP `$VulcanForwarded` i trafia do folderu `IMAP_PROCESSED_FOLDER`.
+
+### Kilka kont
+
+- Wszystkie powiadomienia (z każdego konta) mogą trafiać do **jednej** skrzynki IMAP.
+- Powiadomienie jest przypisywane do konta po adresacie („Kowalski Adam - R - Kowalska Ola - (SP1)”) —
+  serwis zapamiętuje skrzynki każdego konta (`api/Skrzynki`) przy każdym połączeniu. Dopóki skrzynki
+  konta nie są znane (pierwsze uruchomienie), powiadomienie sprawdza wszystkie konta.
+- Każde konto ma własną sesję (`state/accounts/<nazwa>/`), własne `--init` i własny zegar pełnego
+  sprawdzenia. Błąd jednego konta (np. złe hasło) nie blokuje pozostałych i daje osobny alert
+  (`vulcan-logowanie:<nazwa>`).
+- Wiadomość wysłana do obojga rodziców ma w Vulcanie osobną kopię w skrzynce każdego z nich, więc
+  każdy dostaje ją na swój adres (`VULCAN_<NAZWA>_MAIL_TO`).
 
 ### Decyzje
 
@@ -34,7 +47,7 @@ do załączników.
   pliku i link, pliki nie są pobierane.
 - **Wiadomość do kilkorga dzieci** ma w Vulcanie osobną kopię (i osobny UUID) w skrzynce każdego
   ucznia, więc przychodzi osobno dla każdego (pole „Uczeń” w mailu).
-- **Sesja** jest zapisywana w `state/session.json` (chmod 600) i używana ponownie; logowanie tylko,
+- **Sesja** jest zapisywana w `state/accounts/<nazwa>/session.json` (chmod 600) i używana ponownie; logowanie tylko,
   gdy wygaśnie. Na stronie logowania działa automatyczna ochrona przed botami, którą przeglądarka
   przechodzi sama. Jeśli pojawi się captcha do rozwiązania, 2FA lub nieznana strona — serwis robi
   zrzut ekranu, przerywa i wysyła alert. Logowanie nigdy nie jest ponawiane (ryzyko blokady konta).
@@ -43,9 +56,10 @@ do załączników.
 
 - Ponawianie z backoffem (3 próby, 5 s → 15 s) dla IMAP, SMTP i API Vulcana — tylko dla błędów
   przejściowych (sieć, timeouty, 4xx SMTP, 5xx API).
-- Alerty mailowe na `ALERT_EMAIL_TO` (domyślnie `MAIL_TO`), maks. 1 alert danego typu na godzinę:
-  `vulcan-logowanie` (ze zrzutem ekranu), `vulcan`, `imap`, `smtp`, `siec`, `parser`, `dopasowanie`,
-  `nieoczekiwany`.
+- Alerty mailowe na `ALERT_EMAIL_TO` (domyślnie `MAIL_TO`, a bez niego — adresy wszystkich kont), maks.
+  1 alert danego typu na godzinę: `vulcan-logowanie` (ze zrzutem ekranu), `vulcan`, `imap`, `smtp`, `siec`,
+  `parser`, `dopasowanie`, `nieoczekiwany`. Błędy Vulcana mają osobny typ dla każdego konta
+  (`vulcan-logowanie:aga`).
 - Blokada `state/forwarder.lock` — dwa przebiegi nie działają równolegle.
 - Logi na stdout (journald / `docker logs`); hasła z konfiguracji są maskowane w każdym wpisie.
 
@@ -57,14 +71,44 @@ Skopiuj `.env.example` do `.env` i uzupełnij. Najważniejsze:
 |---|---|
 | `IMAP_*` | skrzynka, do której trafiają powiadomienia Vulcana |
 | `SMTP_*`, `MAIL_FROM` | skąd wysyłać (port 587 = STARTTLS, 465 = SSL) |
-| `MAIL_TO` | dokąd przekazywać wiadomości; kilka adresów po przecinku |
-| `VULCAN_LOGIN`, `VULCAN_PASSWORD` | konto eduVULCAN |
+| `VULCAN_ACCOUNTS` | nazwy kont po przecinku, np. `mateusz,aga` (a-z, 0-9, `_`, `-`) |
+| `VULCAN_<NAZWA>_LOGIN`, `VULCAN_<NAZWA>_PASSWORD` | dane konta eduVULCAN, np. `VULCAN_AGA_LOGIN` |
+| `VULCAN_<NAZWA>_MAIL_TO` | dokąd przekazywać wiadomości tego konta; kilka po przecinku; puste = `MAIL_TO` |
+| `MAIL_TO` | domyślni odbiorcy (dla kont bez własnego `_MAIL_TO`) |
+| `VULCAN_LOGIN`, `VULCAN_PASSWORD` | jedno konto, zapis z poprzedniej wersji (gdy `VULCAN_ACCOUNTS` puste) |
 | `NOTIFICATION_SENDER_FILTER` | nadawcy powiadomień, np. `noreply@vulcan.net.pl`; kilka po przecinku |
 | `ALERT_EMAIL_TO` | odbiorcy alertów; kilka po przecinku; puste = `MAIL_TO` |
 | `POLL_INTERVAL_MINUTES` | co ile minut pętla sprawdza IMAP (tylko `--loop`) |
 | `FULL_CHECK_INTERVAL_MINUTES` | co ile minut sprawdzać Vulcana bez powiadomienia (0 = wyłączone) |
 
-Hasła ze znakami specjalnymi (`$`, `#`, spacja) wpisz w apostrofach: `VULCAN_PASSWORD='pa$$#word'`.
+Hasła ze znakami specjalnymi (`$`, `#`, spacja) wpisz w apostrofach: `VULCAN_AGA_PASSWORD='pa$$#word'`.
+
+Przykład dla dwóch kont:
+
+```
+MAIL_TO=
+VULCAN_ACCOUNTS=mateusz,aga
+VULCAN_MATEUSZ_LOGIN=jan@example.com
+VULCAN_MATEUSZ_PASSWORD='...'
+VULCAN_MATEUSZ_MAIL_TO=jan@example.com
+VULCAN_AGA_LOGIN=anna@example.com
+VULCAN_AGA_PASSWORD='...'
+VULCAN_AGA_MAIL_TO=anna@example.com
+ALERT_EMAIL_TO=jan@example.com,anna@example.com
+```
+
+### Dodanie kolejnego konta
+
+1. Dopisz nazwę do `VULCAN_ACCOUNTS` i dodaj `VULCAN_<NAZWA>_LOGIN`, `_PASSWORD`, `_MAIL_TO`.
+2. Sprawdź logowanie: `--probe 3 --account <nazwa>`.
+3. Oznacz bieżące wiadomości konta jako widziane: `--init --account <nazwa>`.
+4. Zrestartuj serwis (`docker compose up -d` / timer systemd podchwyci zmianę sam).
+5. Przekieruj powiadomienia Vulcana z poczty tej osoby na skrzynkę IMAP (filtr `Od: noreply@vulcan.net.pl`
+   → przekaż dalej).
+
+Przejście z jednego konta (`VULCAN_LOGIN`) na `VULCAN_ACCOUNTS`: stan (baza, `--init`) przechodzi na
+**pierwsze** konto z listy automatycznie — wpisz tam swoje dotychczasowe konto i uruchom `--init` tylko
+dla nowych.
 
 ## Instalacja na VPS — Docker (zalecane)
 
@@ -136,10 +180,11 @@ journalctl -u vulcan-forwarder -f
 |---|---|
 | `--once` | jeden przebieg (timer systemd) |
 | `--loop` | pętla co `POLL_INTERVAL_MINUTES` (Docker) |
-| `--init` | zapisuje ostatnie ~200 wiadomości jako widziane, nic nie wysyła |
+| `--init` | zapisuje ostatnie ~200 wiadomości każdego konta jako widziane, nic nie wysyła |
+| `--account NAZWA` | z każdym trybem: tylko wskazane konto (można powtórzyć) |
 | `--dry-run` | z `--once`/`--loop`: maile na stdout zamiast SMTP; nic nie zapisuje w bazie ani w IMAP |
 | `--sync` | z `--once`/`--loop`: wymusza pełne sprawdzenie Vulcana teraz |
-| `--probe [N]` | diagnostyka: logowanie + N ostatnich wiadomości (niczego nie oznacza) |
+| `--probe [N]` | diagnostyka: logowanie + skrzynki + N ostatnich wiadomości każdego konta (niczego nie oznacza) |
 | `--fetch-fixtures N` | zapisuje N ostatnich powiadomień z IMAP do `debug/eml/` |
 | `--debug` | logi DEBUG + zrzuty ekranu/HTML każdego kroku i odpowiedzi API do `debug/run-*/` |
 | `--headed` | przeglądarka z oknem (lokalnie, nie na serwerze bez ekranu) |
@@ -165,13 +210,14 @@ dowolne stare powiadomienie Vulcana na skrzynkę IMAP z adresu dopisanego do
    - formularz logowania → `login()` (pole „Login”, przyciski „Dalej”/„Zaloguj”, `input[type=password]`),
      baner cookies → `_accept_cookies()` (iframe `#respect-privacy-frame`);
    - lista profili / symbol jednostki → `_detect_symbol()`; symbol jest zapamiętany w
-     `state/vulcan.json` — usuń plik, żeby wykryć ponownie;
+     `state/accounts/<nazwa>/vulcan.json` — usuń plik, żeby wykryć ponownie;
    - adresy i pola API → `MessageSummary.from_api`, `Message.from_api`, `list_received`, `get_message`.
      Aktualne nazwy endpointów podejrzysz w narzędziach deweloperskich przeglądarki (zakładka Sieć)
      po otwarciu modułu Wiadomości.
 4. Zmiana formatu maila z powiadomieniem → alert `parser`; poprawki w
    `vulcan_forwarder/notification_parser.py`, nowy przykład do `tests/fixtures/` (`--fetch-fixtures`).
-5. Wymuszenie ponownego logowania: usuń `state/session.json`.
+5. Wymuszenie ponownego logowania: usuń `state/accounts/<nazwa>/session.json`
+   (przy jednym koncie ze starego zapisu: `state/session.json`).
 
 ## Rozwój
 

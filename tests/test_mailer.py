@@ -4,7 +4,7 @@ from vulcan_forwarder.config import Settings
 from vulcan_forwarder.mailer import build_email, sanitize_html, short_name, student_of
 from vulcan_forwarder.vulcan_client import Attachment, Message
 
-SETTINGS = Settings(_env_file=None, mail_from="bot@example.com", mail_to="ja@example.com")
+SETTINGS = Settings(_env_file=None, mail_from="bot@example.com")
 
 
 def make_message(**kw) -> Message:
@@ -60,6 +60,7 @@ def test_build_email():
     msg = build_email(
         make_message(attachments=[Attachment("Regulamin.pdf", "https://1drv.ms/b/c/abc/XYZ")]),
         SETTINGS,
+        "ja@example.com",
         link="https://wiadomosci.eduvulcan.pl/przyklad/App/odebrane",
     )
     assert msg["Subject"] == "[Vulcan] Warsztaty muzyczno-taneczne — Kowalska-Nowicka Ewa"
@@ -78,7 +79,7 @@ def test_build_email():
 
 
 def test_build_email_withdrawn_and_no_link():
-    msg = build_email(make_message(withdrawn=True), SETTINGS)
+    msg = build_email(make_message(withdrawn=True), SETTINGS, "ja@example.com")
     plain = msg.get_body(preferencelist=("plain",)).get_content()
     assert "wycofana" in plain
     assert "Wiadomość w dzienniku" not in plain
