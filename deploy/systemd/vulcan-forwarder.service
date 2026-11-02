@@ -1,0 +1,19 @@
+[Unit]
+Description=Vulcan Message Forwarder (jeden przebieg)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=vulcan
+Group=vulcan
+WorkingDirectory=/opt/vulcan-forwarder
+Environment=PYTHONUNBUFFERED=1
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/vulcan-forwarder/.cache/ms-playwright
+ExecStart=/opt/vulcan-forwarder/.venv/bin/python -m vulcan_forwarder --once
+TimeoutStartSec=15min
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes

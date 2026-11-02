@@ -1,0 +1,19 @@
+services:
+  vulcan-forwarder:
+    build: .
+    image: vulcan-forwarder:latest
+    container_name: vulcan-forwarder
+    command: ["--loop"]
+    # Startuje sam po restarcie serwera (wymaga włączonego serwisu docker: systemctl enable docker).
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./state:/app/state   # sesja Vulcana, baza SQLite, blokada
+      - ./debug:/app/debug   # zrzuty ekranu przy błędach i w trybie --debug
+    init: true
+    shm_size: "1gb"          # Chromium potrzebuje więcej niż domyślne 64 MB /dev/shm
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

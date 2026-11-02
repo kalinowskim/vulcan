@@ -1,0 +1,28 @@
+[project]
+name = "vulcan-forwarder"
+version = "0.1.0"
+description = "Przekazuje pełną treść wiadomości z dziennika VULCAN (eduVULCAN) na e-mail"
+requires-python = ">=3.12"
+dependencies = [
+    "playwright==1.64.1",
+    "imapclient==4.1.0",
+    "pydantic-settings==2.16.2",
+    "nh3==0.3.7",
+    "tzdata",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.2.0"]
+
+[project.scripts]
+vulcan-forwarder = "vulcan_forwarder.main:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["vulcan_forwarder"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

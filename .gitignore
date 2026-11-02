@@ -1,0 +1,11 @@
+.env
+state/
+debug/
+*.db
+*.db-journal
+*.lock
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/

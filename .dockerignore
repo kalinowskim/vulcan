@@ -1,0 +1,11 @@
+.env
+.venv/
+state/
+debug/
+tests/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+deploy/
+prompt-vulcan-forwarder.md
