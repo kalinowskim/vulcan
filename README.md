@@ -181,6 +181,7 @@ journalctl -u vulcan-forwarder -f
 | `--once` | jeden przebieg (timer systemd) |
 | `--loop` | pętla co `POLL_INTERVAL_MINUTES` (Docker) |
 | `--init` | zapisuje ostatnie ~200 wiadomości każdego konta jako widziane, nic nie wysyła |
+| `--init --forward-last N` | jak `--init`, ale N najnowszych wiadomości każdego konta (także już przekazanych) zostanie wysłanych w najbliższym przebiegu |
 | `--account NAZWA` | z każdym trybem: tylko wskazane konto (można powtórzyć) |
 | `--dry-run` | z `--once`/`--loop`: maile na stdout zamiast SMTP; nic nie zapisuje w bazie ani w IMAP |
 | `--sync` | z `--once`/`--loop`: wymusza pełne sprawdzenie Vulcana teraz |

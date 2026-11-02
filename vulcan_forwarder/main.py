@@ -94,6 +94,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--account", action="append", metavar="NAZWA", help="tylko wskazane konto (można powtórzyć)")
     p.add_argument("--dry-run", action="store_true", help="zamiast wysyłać mail, wypisz go na stdout")
     p.add_argument("--sync", action="store_true", help="z --once/--loop: wymuś pełne sprawdzenie Vulcana teraz")
+    p.add_argument("--forward-last", type=int, default=0, metavar="N",
+                   help="z --init: N najnowszych wiadomości każdego konta zostaw do (ponownego) przekazania")  # fmt: skip
     p.add_argument("--headed", action="store_true", help="uruchom przeglądarkę z oknem")
     p.add_argument("--debug", action="store_true", help="screenshoty + HTML każdego kroku do debug/, logi DEBUG")
     return p.parse_args(argv)
@@ -411,7 +413,12 @@ def run_once(settings: Settings, args: argparse.Namespace, alerter: Alerter | No
 
 
 def init_store(settings: Settings, args: argparse.Namespace, alerter: Alerter | None = None) -> bool:
-    """Pierwsze uruchomienie (lub nowe konto): zapisuje bieżące wiadomości jako widziane, nic nie wysyła."""
+    """Pierwsze uruchomienie (lub nowe konto): zapisuje bieżące wiadomości jako widziane, nic nie wysyła.
+
+    Z --forward-last N: N najnowszych wiadomości każdego konta nie jest oznaczane — jeśli były już w bazie
+    (widziane lub przekazane), zostają z niej usunięte — więc najbliższy przebieg je wyśle.
+    """
+    forward_last = max(getattr(args, "forward_last", 0) or 0, 0)
     ok = True
     with Store(settings.db_path) as store:
         migrate_legacy_state(settings, store)
@@ -424,8 +431,10 @@ def init_store(settings: Settings, args: argparse.Namespace, alerter: Alerter | 
                 report_failure(alerter, exc, account=account.name)
                 ok = False
                 continue
+            newest_first = sorted(summaries, key=lambda s: s.sent_at, reverse=True)
+            to_forward, to_mark = newest_first[:forward_last], newest_first[forward_last:]
             added = 0
-            for s in summaries:
+            for s in to_mark:
                 added += store.record(
                     account=account.name,
                     vulcan_key=s.key,
@@ -436,9 +445,15 @@ def init_store(settings: Settings, args: argparse.Namespace, alerter: Alerter | 
                     mailbox=s.mailbox,
                     status=SEEN,
                 )
+            for s in to_forward:
+                if store.forget(s.key):
+                    log.info("[%s] --init: %s („%s”) usunięta z bazy — zostanie wysłana ponownie", account.name,
+                             s.key, s.subject)  # fmt: skip
             store.mark_initialized(account.name)
-            log.info("[%s] --init: oznaczono %d wiadomości jako widziane (pobrano %d)", account.name, added,
-                     len(summaries))  # fmt: skip
+            if to_forward:
+                store.reset_last_full_check(account.name)  # najbliższy przebieg od razu zsynchronizuje konto
+            log.info("[%s] --init: oznaczono %d wiadomości jako widziane (pobrano %d)%s", account.name, added,
+                     len(summaries), f"; {len(to_forward)} najnowszych do przekazania" if to_forward else "")  # fmt: skip
     return ok
 
 

@@ -132,6 +132,11 @@ class Store:
             )
         return cur.rowcount == 1
 
+    def forget(self, vulcan_key: str) -> bool:
+        """Usuwa wiadomość z bazy (zostanie potraktowana jak nowa). Zwraca True, jeśli była zapisana."""
+        with self.conn:
+            return self.conn.execute("DELETE FROM messages WHERE vulcan_key = ?", (vulcan_key.lower(),)).rowcount == 1
+
     def get_meta(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         return row[0] if row else None
@@ -156,6 +161,10 @@ class Store:
 
     def set_last_full_check(self, account: str, when: datetime) -> None:
         self.set_meta(f"{LAST_FULL_CHECK}:{account}", _utc_iso(when))
+
+    def reset_last_full_check(self, account: str) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM meta WHERE key = ?", (f"{LAST_FULL_CHECK}:{account}",))
 
     def status_of(self, vulcan_key: str) -> str | None:
         row = self.conn.execute("SELECT status FROM messages WHERE vulcan_key = ?", (vulcan_key.lower(),)).fetchone()

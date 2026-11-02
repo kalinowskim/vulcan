@@ -132,7 +132,7 @@ def env(tmp_path, monkeypatch):
 
 
 def args(**kw):
-    base = dict(dry_run=False, headed=False, debug=False, sync=False, account=None)
+    base = dict(dry_run=False, headed=False, debug=False, sync=False, account=None, forward_last=0)
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -282,3 +282,22 @@ def test_legacy_state_moves_to_first_named_account(env):
         assert store.is_initialized("mateusz") and not store.is_initialized("aga")
     assert (settings.state_dir / "accounts" / "mateusz" / "session.json").exists()
     assert not (settings.state_dir / "session.json").exists()
+
+
+def test_reinit_with_forward_last_resends_newest_per_account(env):
+    settings, sent, _, vulcan = env
+    jan = [summary(f"j{i}", f"Jan {i}", NOW - timedelta(hours=10 - i)) for i in range(5)]  # j4 najnowsza
+    anna = [summary(f"a{i}", f"Anna {i}", NOW - timedelta(hours=10 - i), mailbox=ANNA_MAJA) for i in range(3)]
+    vulcan.add("mateusz", [JAN_MAJA], jan)
+    vulcan.add("aga", [ANNA_MAJA], anna)
+    # Zwykłe --init: nic nie idzie.
+    assert main.init_store(settings, args())
+    assert main.run_once(settings, args(sync=True)) and sent == []
+    # Ponowny init z --forward-last 2: dwie najnowsze z każdego konta (także już widziane) idą od razu.
+    assert main.init_store(settings, args(forward_last=2))
+    assert main.run_once(settings, args())  # bez --sync: init wyzerował zegar pełnego sprawdzenia
+    assert sorted(k for k, _ in sent) == ["a1", "a2", "j3", "j4"]
+    assert ("j4", "mateusz@x.pl") in sent and ("a2", "aga@x.pl, druga@x.pl") in sent
+    # I tylko raz.
+    assert main.run_once(settings, args(sync=True))
+    assert len(sent) == 4
