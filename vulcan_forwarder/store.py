@@ -7,9 +7,11 @@ wiadomości, znacznik --init i czas ostatniego pełnego sprawdzenia.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 SCHEMA = """
@@ -25,6 +27,20 @@ CREATE TABLE IF NOT EXISTS messages (
     processed_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_sent_at ON messages(sent_at);
+-- Oceny, sprawdziany i zadania domowe widziane w dzienniku ucznia (podsumowanie tygodnia, powiadomienia).
+CREATE TABLE IF NOT EXISTS diary_items (
+    account TEXT NOT NULL,
+    item_key TEXT NOT NULL,               -- diary.Grade.key / diary.CalendarItem.key
+    kind TEXT NOT NULL,                   -- 'grade' | 'test' | 'homework'
+    student TEXT NOT NULL,                -- klucz ucznia
+    item_date TEXT,                       -- data oceny / termin (YYYY-MM-DD)
+    prev_date TEXT,                       -- poprzedni termin, gdy go zmieniono po powiadomieniu
+    data TEXT NOT NULL,                   -- JSON do treści maila
+    first_seen TEXT NOT NULL,             -- ISO 8601, UTC
+    notified_at TEXT,                     -- kiedy poszło powiadomienie / podsumowanie z tym wpisem
+    baseline INTEGER NOT NULL DEFAULT 0,  -- 1 = zastany przy pierwszym sprawdzeniu ucznia (bez pilnych maili)
+    PRIMARY KEY (account, item_key)
+);
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -169,3 +185,77 @@ class Store:
     def status_of(self, vulcan_key: str) -> str | None:
         row = self.conn.execute("SELECT status FROM messages WHERE vulcan_key = ?", (vulcan_key.lower(),)).fetchone()
         return row[0] if row else None
+
+    # --- dziennik ucznia ---------------------------------------------------------------------
+
+    def diary_item(self, account: str, item_key: str) -> DiaryItem | None:
+        row = self.conn.execute(f"SELECT {DIARY_COLUMNS} FROM diary_items WHERE account = ? AND item_key = ?",
+                                (account, item_key)).fetchone()  # fmt: skip
+        return DiaryItem.from_row(row) if row else None
+
+    def add_diary_item(self, account: str, item_key: str, kind: str, student: str, item_date: date | None,
+                       data: dict, first_seen: datetime, baseline: bool = False) -> None:  # fmt: skip
+        with self.conn:
+            self.conn.execute(
+                """INSERT OR IGNORE INTO diary_items (account, item_key, kind, student, item_date, data, first_seen,
+                   baseline) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (account, item_key, kind, student, item_date.isoformat() if item_date else None,
+                 json.dumps(data, ensure_ascii=False), _utc_iso(first_seen), int(baseline)),
+            )  # fmt: skip
+
+    def reschedule_diary_item(self, account: str, item_key: str, new_date: date, prev_date: date | None) -> None:
+        """Zmieniony termin: wpis wraca do powiadomienia (z informacją o poprzednim terminie)."""
+        with self.conn:
+            self.conn.execute(
+                """UPDATE diary_items SET item_date = ?, prev_date = ?, notified_at = NULL, baseline = 0
+                   WHERE account = ? AND item_key = ?""",
+                (new_date.isoformat(), prev_date.isoformat() if prev_date else None, account, item_key),
+            )
+
+    def mark_diary_notified(self, account: str, item_keys: list[str], when: datetime) -> None:
+        with self.conn:
+            self.conn.executemany(
+                "UPDATE diary_items SET notified_at = ? WHERE account = ? AND item_key = ?",
+                [(_utc_iso(when), account, key) for key in item_keys],
+            )
+
+    def grades_seen_since(self, account: str, since: datetime) -> list[DiaryItem]:
+        rows = self.conn.execute(
+            f"""SELECT {DIARY_COLUMNS} FROM diary_items WHERE account = ? AND kind = 'grade' AND first_seen > ?
+                ORDER BY item_date, first_seen""",
+            (account, _utc_iso(since)),
+        ).fetchall()
+        return [DiaryItem.from_row(r) for r in rows]
+
+    def pending_calendar_items(self, account: str, from_date: date) -> list[DiaryItem]:
+        """Sprawdziany i zadania, o których jeszcze nie powiadomiono, z terminem od `from_date`."""
+        rows = self.conn.execute(
+            f"""SELECT {DIARY_COLUMNS} FROM diary_items WHERE account = ? AND kind IN ('test', 'homework')
+                AND notified_at IS NULL AND item_date >= ? ORDER BY item_date, first_seen""",
+            (account, from_date.isoformat()),
+        ).fetchall()
+        return [DiaryItem.from_row(r) for r in rows]
+
+
+DIARY_COLUMNS = "item_key, kind, student, item_date, prev_date, data, first_seen, notified_at, baseline"
+
+
+@dataclass(frozen=True)
+class DiaryItem:
+    key: str
+    kind: str
+    student: str
+    date: date | None
+    prev_date: date | None
+    data: dict
+    first_seen: datetime
+    notified_at: datetime | None
+    baseline: bool
+
+    @classmethod
+    def from_row(cls, row: tuple) -> DiaryItem:
+        key, kind, student, item_date, prev_date, data, first_seen, notified_at, baseline = row
+        return cls(key=key, kind=kind, student=student, date=date.fromisoformat(item_date) if item_date else None,
+                   prev_date=date.fromisoformat(prev_date) if prev_date else None, data=json.loads(data),
+                   first_seen=datetime.fromisoformat(first_seen),
+                   notified_at=datetime.fromisoformat(notified_at) if notified_at else None, baseline=bool(baseline))  # fmt: skip

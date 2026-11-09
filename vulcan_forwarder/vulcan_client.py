@@ -13,6 +13,8 @@ Zbadany przebieg (2026-11):
   3. https://wiadomosci.eduvulcan.pl/<symbol>/App — moduł Wiadomości, wszystkie skrzynki naraz.
      API: Skrzynki, Odebrane?idLastWiadomosc=&pageSize=, WiadomoscSzczegoly?apiGlobalKey=.
      Sam GET szczegółów NIE oznacza wiadomości jako przeczytanej (robi to osobny PUT z UI).
+  4. https://uczen.eduvulcan.pl/<symbol>/api/... — dziennik ucznia (oceny, sprawdziany, zadania domowe),
+     sesja z SSO po wejściu w profil; endpointy opisane w diary.py.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,7 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
 from vulcan_forwarder.config import Account, Settings
+from vulcan_forwarder.diary import WARSAW, CalendarItem, Grade, Period, Student, parse_grades, periods_to_check
 from vulcan_forwarder.resilience import retry
 
 log = logging.getLogger(__name__)
@@ -39,6 +42,7 @@ log = logging.getLogger(__name__)
 LOGIN_URL = "https://eduvulcan.pl/logowanie"
 PROFILES_URL = "https://eduvulcan.pl/dostep-do-dziennika/"
 MESSAGES_HOST = "https://wiadomosci.eduvulcan.pl"
+DIARY_HOST = "https://uczen.eduvulcan.pl"
 STEP_TIMEOUT_MS = 30_000
 NAV_TIMEOUT_MS = 60_000
 PAGE_SIZE = 50
@@ -336,13 +340,13 @@ class VulcanClient:
 
     # --- API wiadomości --------------------------------------------------------------------
 
-    def _get_json(self, endpoint: str) -> Any:
+    def _get_json(self, endpoint: str, host: str = MESSAGES_HOST) -> Any:
         name = endpoint.split("?")[0]
-        return retry(lambda: self._get_json_once(endpoint), what=f"Vulcan: API {name}",
+        return retry(lambda: self._get_json_once(endpoint, host), what=f"Vulcan: API {name}",
                      should_retry=is_transient_vulcan_error)  # fmt: skip
 
-    def _get_json_once(self, endpoint: str) -> Any:
-        url = self._api_url(endpoint)
+    def _get_json_once(self, endpoint: str, host: str = MESSAGES_HOST) -> Any:
+        url = f"{host}/{self._symbol}/api/{endpoint}"
         resp = self.page.request.get(url, max_redirects=0, timeout=STEP_TIMEOUT_MS)
         if not resp.ok or "json" not in resp.headers.get("content-type", ""):
             raise VulcanApiError(
@@ -385,6 +389,64 @@ class VulcanClient:
     def get_message(self, key: str, mailbox: str | None = None) -> Message:
         """Pełna treść wiadomości. Nie oznacza jej jako przeczytanej."""
         return Message.from_api(self._get_json(f"WiadomoscSzczegoly?apiGlobalKey={key}"), mailbox=mailbox)
+
+    # --- dziennik ucznia (oceny, sprawdziany, zadania domowe) ---------------------------------
+
+    def diary_url(self, student_key: str, route: str) -> str:
+        return f"{DIARY_HOST}/{self._symbol}/App/{student_key}/{route}"
+
+    def _diary_session_valid(self) -> bool:
+        try:
+            resp = self.page.request.get(f"{DIARY_HOST}/{self._symbol}/api/Context", max_redirects=0)
+            return resp.ok and "json" in resp.headers.get("content-type", "")
+        except PlaywrightError as exc:
+            log.info("Vulcan: sprawdzenie sesji dziennika nie powiodło się: %s", str(exc).splitlines()[0])
+            return False
+
+    def enter_diary(self) -> None:
+        """Sesja w uczen.eduvulcan.pl. Gdy wygasła — wejście przez listę profili (SSO z eduvulcan.pl)."""
+        if self._diary_session_valid():
+            return
+        log.info("Vulcan: wejście do dziennika ucznia przez listę profili")
+        page = self.page
+        page.goto(PROFILES_URL, wait_until="domcontentloaded")
+        self.snapshot("profiles")
+        try:
+            page.locator("a[href*='/dziennik?']").first.click()
+            page.wait_for_url(re.compile(rf"{re.escape(DIARY_HOST)}/[^/]+/App"), timeout=NAV_TIMEOUT_MS)
+        except PlaywrightTimeout:
+            raise self._login_failure("Nie udało się wejść do dziennika ucznia z listy profili") from None
+        self.snapshot("dziennik")
+        if not self._diary_session_valid():
+            raise VulcanError("Po wejściu do dziennika API ucznia nadal niedostępne", self.snapshot("diary-api", force=True))
+
+    def students(self) -> list[Student]:
+        """Wszyscy uczniowie konta (api/Context dziennika)."""
+        return [Student.from_api(s) for s in self._get_json("Context", DIARY_HOST).get("uczniowie") or []]
+
+    def grades(self, student: Student, today: date) -> list[Grade]:
+        """Oceny cząstkowe ucznia z bieżącego (i tuż po zmianie — poprzedniego) okresu klasyfikacyjnego."""
+        periods = [Period.from_api(p) for p in
+                   self._get_json(f"OkresyKlasyfikacyjne?key={student.key}&idDziennik={student.diary_id}", DIARY_HOST)]  # fmt: skip
+        result: list[Grade] = []
+        for period in periods_to_check(periods, today):
+            data = self._get_json(f"Oceny?key={student.key}&idOkresKlasyfikacyjny={period.id}", DIARY_HOST)
+            result.extend(parse_grades(data, student.key))
+        return result
+
+    def calendar(self, student: Student, start: date, end: date) -> list[CalendarItem]:
+        """Sprawdziany, kartkówki i zadania domowe z terminem od `start` do `end` włącznie."""
+        since = datetime.combine(start, datetime.min.time(), WARSAW).astimezone(timezone.utc)
+        until = datetime.combine(end + timedelta(days=1), datetime.min.time(), WARSAW).astimezone(timezone.utc)
+        fmt = "%Y-%m-%dT%H:%M:%S.000Z"
+        data = self._get_json(f"SprawdzianyZadaniaDomowe?key={student.key}&dataOd={since:{fmt}}&dataDo={until:{fmt}}",
+                              DIARY_HOST)  # fmt: skip
+        return [CalendarItem.from_api(i, student.key) for i in data or []]
+
+    def calendar_details(self, item: CalendarItem) -> dict[str, Any]:
+        """Opis i nauczyciel sprawdzianu / zadania domowego."""
+        endpoint = "ZadanieDomoweSzczegoly" if item.is_homework else "SprawdzianSzczegoly"
+        return self._get_json(f"{endpoint}?key={item.student}&id={item.id}", DIARY_HOST)
 
     # --- debug -------------------------------------------------------------------------------
 

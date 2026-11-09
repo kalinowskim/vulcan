@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     # Co ile minut sprawdzać Vulcana niezależnie od powiadomień (0 = tylko na powiadomienie).
     full_check_interval_minutes: int = 60
     notification_sender_filter: str = ""
+
+    # Dziennik ucznia: podsumowanie tygodnia (oceny + nowe sprawdziany/zadania) w sobotę o WEEKLY_DIGEST_HOUR
+    # i codzienne (nd–czw) sprawdzenie kalendarza o DAILY_CHECK_HOUR — pilne wpisy idą od razu.
+    diary_enabled: bool = True
+    weekly_digest_hour: int = Field(default=9, ge=0, le=23)
+    daily_check_hour: int = Field(default=17, ge=0, le=23)
     alert_email_to: str = ""
 
     state_dir: Path = Path("state")

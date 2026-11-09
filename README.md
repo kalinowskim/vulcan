@@ -1,7 +1,10 @@
 # Vulcan Message Forwarder
 
-Przekazuje na e-mail **pełną treść** wiadomości z dziennika VULCAN (eduVULCAN). Vulcan wysyła tylko
-powiadomienie „masz nową wiadomość” — serwis łapie je w skrzynce IMAP, loguje się do eduVULCAN,
+Przekazuje na e-mail **pełną treść** wiadomości z dziennika VULCAN (eduVULCAN), a do tego wysyła
+**sobotnie podsumowanie tygodnia** (nowe oceny, sprawdziany, kartkówki, zadania domowe) i **od razu**
+powiadamia o nowym sprawdzianie/zadaniu na bieżący tydzień — patrz „Oceny, sprawdziany i zadania domowe”.
+
+Vulcan wysyła tylko powiadomienie „masz nową wiadomość” — serwis łapie je w skrzynce IMAP, loguje się do eduVULCAN,
 pobiera treść i wysyła czytelny mail (HTML + tekst) z nadawcą, adresatami, datą, uczniem i linkami
 do załączników. Obsługuje kilka kont eduVULCAN (np. obojga rodziców) — wiadomości każdego konta idą na
 jego własne adresy.
@@ -63,6 +66,35 @@ jego własne adresy.
 - Blokada `state/forwarder.lock` — dwa przebiegi nie działają równolegle.
 - Logi na stdout (journald / `docker logs`); hasła z konfiguracji są maskowane w każdym wpisie.
 
+## Oceny, sprawdziany i zadania domowe
+
+Dane z dziennika ucznia (`uczen.eduvulcan.pl`, ta sama sesja co wiadomości). Jeden mail na konto,
+ze wszystkimi uczniami konta, na adresy `VULCAN_<NAZWA>_MAIL_TO`.
+
+- **Sobota, `WEEKLY_DIGEST_HOUR` (domyślnie 9:00)** — podsumowanie tygodnia, dla każdego ucznia:
+  - oceny, które pojawiły się od poprzedniego podsumowania (także wystawione z datą wsteczną),
+  - nowe sprawdziany, kartkówki, prace klasowe i zadania domowe, o których jeszcze nie było maila
+    (z terminem od dziś).
+  Mail idzie także, gdy nic nowego nie ma („brak nowych ocen”) — wtedy widać, że serwis działa.
+- **Niedziela–czwartek, `DAILY_CHECK_HOUR` (domyślnie 17:00)** — sprawdzenie kalendarza. Nowy wpis
+  z terminem przed poniedziałkiem po najbliższej sobocie (sobotnie podsumowanie byłoby spóźnione)
+  przychodzi od razu, w jednym mailu dla wszystkich uczniów. Wpisy na później czekają na sobotę.
+- **Zmiana terminu** sprawdzianu, o którym już był mail, liczy się jak nowy wpis („zmiana terminu, było …”).
+
+Szczegóły:
+
+- Vulcan nie podaje, kiedy wpis dodano, więc „nowe” = nieznane bazie przy poprzednim sprawdzeniu
+  (tabela `diary_items`). Kalendarz jest pobierany na 35 dni do przodu.
+- **Pierwsze sprawdzenie ucznia** zapisuje wszystko, co już jest w dzienniku, bez pilnych maili: oceny
+  liczą się wg daty wystawienia (pierwsze podsumowanie ma oceny z ostatniego tygodnia), a zastane
+  sprawdziany i zadania trafią do najbliższego podsumowania. Nie trzeba uruchamiać `--init`.
+- Pierwsze podsumowanie idzie w najbliższą sobotę. Sobotę pominiętą przez awarię/wyłączony serwer
+  dosyłamy do 2 dni później.
+- Po błędzie (np. logowania) kolejna próba najwcześniej po 30 min; alert jak przy wiadomościach.
+- Ręcznie: `--digest weekly` / `--digest daily` (z `--dry-run` — podgląd na stdout na kopii bazy,
+  nic nie zapisuje).
+- Godziny według czasu polskiego (Europe/Warsaw), niezależnie od strefy serwera.
+
 ## Konfiguracja
 
 Skopiuj `.env.example` do `.env` i uzupełnij. Najważniejsze:
@@ -80,6 +112,9 @@ Skopiuj `.env.example` do `.env` i uzupełnij. Najważniejsze:
 | `ALERT_EMAIL_TO` | odbiorcy alertów; kilka po przecinku; puste = `MAIL_TO` |
 | `POLL_INTERVAL_MINUTES` | co ile minut pętla sprawdza IMAP (tylko `--loop`) |
 | `FULL_CHECK_INTERVAL_MINUTES` | co ile minut sprawdzać Vulcana bez powiadomienia (0 = wyłączone) |
+| `DIARY_ENABLED` | podsumowanie tygodnia i powiadomienia o sprawdzianach/zadaniach (`true`/`false`) |
+| `WEEKLY_DIGEST_HOUR` | godzina sobotniego podsumowania (0–23, domyślnie 9) |
+| `DAILY_CHECK_HOUR` | godzina sprawdzenia kalendarza nd–czw (0–23, domyślnie 17) |
 
 Hasła ze znakami specjalnymi (`$`, `#`, spacja) wpisz w apostrofach: `VULCAN_AGA_PASSWORD='pa$$#word'`.
 
@@ -178,12 +213,13 @@ journalctl -u vulcan-forwarder -f
 
 | Komenda | Co robi |
 |---|---|
-| `--once` | jeden przebieg (timer systemd) |
+| `--once` | jeden przebieg (timer systemd): wiadomości + dziennik ucznia, gdy przyszła pora |
 | `--loop` | pętla co `POLL_INTERVAL_MINUTES` (Docker) |
 | `--init` | zapisuje ostatnie ~200 wiadomości każdego konta jako widziane, nic nie wysyła |
 | `--init --forward-last N` | jak `--init`, ale N najnowszych wiadomości każdego konta (także już przekazanych) zostanie wysłanych w najbliższym przebiegu |
 | `--account NAZWA` | z każdym trybem: tylko wskazane konto (można powtórzyć) |
-| `--dry-run` | z `--once`/`--loop`: maile na stdout zamiast SMTP; nic nie zapisuje w bazie ani w IMAP |
+| `--digest weekly\|daily` | dziennik ucznia teraz: podsumowanie tygodnia / sprawdzenie kalendarza |
+| `--dry-run` | z `--once`/`--loop`/`--digest`: maile na stdout zamiast SMTP; nic nie zapisuje w bazie ani w IMAP |
 | `--sync` | z `--once`/`--loop`: wymusza pełne sprawdzenie Vulcana teraz |
 | `--probe [N]` | diagnostyka: logowanie + skrzynki + N ostatnich wiadomości każdego konta (niczego nie oznacza) |
 | `--fetch-fixtures N` | zapisuje N ostatnich powiadomień z IMAP do `debug/eml/` |
@@ -228,6 +264,7 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev]" && .venv/bin/playwrigh
 ```
 
 Moduły: `config` (ustawienia), `imap_watcher` (IMAP), `notification_parser` (parser powiadomień),
-`vulcan_client` (Playwright + API), `matcher` (dopasowanie), `mailer` (budowa i wysyłka maila,
+`vulcan_client` (Playwright + API), `diary` (oceny/kalendarz: modele, API, harmonogram), `digest`
+(podsumowanie tygodnia i pilne powiadomienia), `matcher` (dopasowanie), `mailer` (budowa i wysyłka maila,
 sanityzacja HTML), `store` (SQLite), `alerts` (alerty z throttlingiem), `resilience` (retry, blokada,
 maskowanie sekretów), `main` (CLI, przebieg).

@@ -21,6 +21,7 @@ from playwright.sync_api import Error as PlaywrightError
 
 from vulcan_forwarder.alerts import Alerter
 from vulcan_forwarder.config import DEFAULT_ACCOUNT, Account, ConfigError, Settings
+from vulcan_forwarder.digest import DAILY, WEEKLY, run_diary
 from vulcan_forwarder.imap_watcher import ImapWatcher
 from vulcan_forwarder.mailer import build_email, send
 from vulcan_forwarder.matcher import match
@@ -90,6 +91,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         const=5,
         metavar="N",
         help="diagnostyka Vulcana: zaloguj się i wypisz N ostatnich odebranych wiadomości (bez oznaczania)",
+    )
+    mode.add_argument(
+        "--digest",
+        choices=[WEEKLY, DAILY],
+        help="dziennik ucznia teraz: weekly = podsumowanie tygodnia (oceny + nowe sprawdziany/zadania), "
+        "daily = sprawdzenie kalendarza i pilne powiadomienia",
     )
     p.add_argument("--account", action="append", metavar="NAZWA", help="tylko wskazane konto (można powtórzyć)")
     p.add_argument("--dry-run", action="store_true", help="zamiast wysyłać mail, wypisz go na stdout")
@@ -457,6 +464,33 @@ def init_store(settings: Settings, args: argparse.Namespace, alerter: Alerter | 
     return ok
 
 
+def diary_step(settings: Settings, args: argparse.Namespace, alerter: Alerter | None = None) -> bool:
+    """Oceny / sprawdziany / zadania domowe: według harmonogramu albo wymuszone przez --digest."""
+    return run_diary(
+        settings,
+        selected_accounts(settings, args),
+        dry_run=args.dry_run,
+        force=getattr(args, "digest", None),
+        headed=args.headed,
+        debug=args.debug,
+        on_error=lambda exc, account: report_failure(alerter, exc, account=account),
+    )
+
+
+def run_cycle(settings: Settings, args: argparse.Namespace, alerter: Alerter | None = None) -> bool:
+    """Przebieg --once / --loop: wiadomości, potem dziennik ucznia (gdy przyszła na niego pora)."""
+    results = []
+    for step in (run_once, diary_step):  # błąd jednego kroku (np. IMAP) nie blokuje drugiego
+        try:
+            results.append(step(settings, args, alerter))
+        except ConfigError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            report_failure(alerter, exc)
+            results.append(False)
+    return all(r is not False for r in results)
+
+
 def classify(exc: BaseException) -> tuple[str, str, Path | None]:
     """(typ alertu, opis, zrzut ekranu) dla błędu przebiegu. Typ służy też do throttlingu alertów."""
     if isinstance(exc, VulcanLoginError):
@@ -519,15 +553,20 @@ def main(argv: list[str] | None = None) -> int:
             probe_vulcan(settings, args, args.probe)
         elif args.init:
             return 0 if guarded(settings, args, alerter, init_store) else 1
+        elif args.digest:
+            return 0 if guarded(settings, args, alerter, diary_step) else 1
         elif args.once:
-            return 0 if guarded(settings, args, alerter, run_once) else 1
+            return 0 if guarded(settings, args, alerter, run_cycle) else 1
         else:
             interval = settings.poll_interval_minutes * 60
             names = ", ".join(a.name for a in selected_accounts(settings, args))
             log.info("Tryb pętli: konta %s; co %d min, pełne sprawdzenie co %d min", names,
                      settings.poll_interval_minutes, settings.full_check_interval_minutes)  # fmt: skip
+            if settings.diary_enabled:
+                log.info("Dziennik: podsumowanie tygodnia w soboty o %d:00, sprawdzenie kalendarza nd–czw o %d:00",
+                         settings.weekly_digest_hour, settings.daily_check_hour)  # fmt: skip
             while True:
-                guarded(settings, args, alerter, run_once)
+                guarded(settings, args, alerter, run_cycle)
                 args.sync = False  # --sync dotyczy tylko pierwszego przebiegu
                 time.sleep(interval)
     except ConfigError as exc:
